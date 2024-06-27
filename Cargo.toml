@@ -3,4 +3,8 @@ name = "bip347-enforcer"
 version = "0.1.0"
 edition = "2021"
 
+[build-dependencies]
+cc = "1.0.101"
+
 [dependencies]
+libc = "0.2.155"

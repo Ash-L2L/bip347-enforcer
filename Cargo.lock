@@ -5,3 +5,19 @@ version = 3
 [[package]]
 name = "bip347-enforcer"
 version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "cc"
+version = "1.0.101"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac367972e516d45567c7eafc73d24e1c193dcf200a8d94e9db7b3d38b349572d"
+
+[[package]]
+name = "libc"
+version = "0.2.155"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97b3888a4aecf77e811145cadf6eef5901f4782c53886191b2f693f24761847c"
