@@ -1,0 +1,6 @@
+[package]
+name = "bip347-enforcer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
