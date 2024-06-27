@@ -7,4 +7,15 @@ edition = "2021"
 cc = "1.0.101"
 
 [dependencies]
+anyhow = "1.0.86"
+bitcoin = "0.32.2"
+bitcoincore-rpc-async = "4.0.1-alpha.2"
+bitcoincore-zmq = { version = "1.5.0", features = ["async"] }
+clap = { version = "4.5.7", features = ["derive"] }
+futures = "0.3.30"
 libc = "0.2.155"
+sapio-bitcoin = "0.28.0-rc.3"
+thiserror = "1.0.61"
+tokio = { version = "1.38.0", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
