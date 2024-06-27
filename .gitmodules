@@ -1,0 +1,4 @@
+[submodule "depends/bitcoin"]
+	path = depends/bitcoin
+	url = https://github.com/0xBEEFCAF3/bitcoin.git
+	branch = arm/re-enable-opcat
