@@ -24,7 +24,9 @@ fn configure_bitcoin() {
     // Run the configure script to generate config headers
     let status = Command::new("sh")
         .arg("-c")
-        .arg(format!("cd {SOURCE_DIR} && ./autogen.sh && ./configure --with-secp256k1={out_dir}"))
+        .arg(format!(
+            "cd {SOURCE_DIR} && ./autogen.sh && ./configure --with-secp256k1={out_dir}"
+        ))
         .status()
         .expect("failed to configure Bitcoin Core");
 

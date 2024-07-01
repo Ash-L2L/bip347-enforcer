@@ -1,5 +1,6 @@
 #include <vector>
 
+#include <policy/policy.h>
 #include <primitives/transaction.h>
 #include <node/protocol_version.h>
 #include <script/interpreter.h>
@@ -7,6 +8,10 @@
 #include <streams.h>
 
 extern "C" {
+    unsigned int standard_script_verify_flags() {
+        return STANDARD_SCRIPT_VERIFY_FLAGS;
+    }
+
     bool verify_script(const uint8_t* scriptPubKey, uint32_t scriptPubKeyLen,
                        const uint8_t* txTo, uint32_t txToLen,
                        unsigned int nIn, unsigned int flags,

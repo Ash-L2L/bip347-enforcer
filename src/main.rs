@@ -94,7 +94,6 @@ fn validate_tx(
     tx: &bitcoin::Transaction,
     spent_outputs: &HashMap<bitcoin::Txid, bitcoin::Transaction>,
 ) -> bool {
-    const FLAGS: u32 = 0;
     let tx_encoded = bitcoin::consensus::serialize(tx);
     let get_spent_output = |outpoint: &bitcoin::OutPoint| {
         &spent_outputs[&outpoint.txid].output[outpoint.vout as usize]
@@ -106,7 +105,7 @@ fn validate_tx(
             &spk_encoded,
             &tx_encoded,
             idx as u32,
-            FLAGS,
+            bitcoin_script::standard_script_verify_flags(),
             spent_output.value.to_sat() as i64,
         ) {
             return false;
