@@ -1,14 +1,21 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, net::SocketAddr, time::Duration};
 
-use bitcoincore_rpc_async::{Auth as RpcAuth, Client as RpcClient, Error as RpcError, RpcApi};
+use bip300301::{
+    client::{GetRawTransactionClient, GetRawTransactionVerbose},
+    MainClient as _,
+};
+use bitcoin_0_31::hashes::Hash;
 use bitcoincore_zmq::Error as ZmqError;
 use bitcoincore_zmq::Message as ZmqMessage;
 use clap::Parser;
+use futures::stream;
+use futures::StreamExt;
 use futures::{stream::FuturesUnordered, TryStreamExt};
-use sapio_bitcoin::hashes::Hash;
+use jsonrpsee::http_client::HttpClient;
 use thiserror::Error;
 use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
 
+mod bitcoin_rpc;
 mod bitcoin_script;
 
 #[derive(Parser)]
@@ -18,7 +25,7 @@ struct Cli {
     log_level: tracing::Level,
     /// Bitcoin node RPC address
     #[arg(long)]
-    rpc_addr: String,
+    rpc_addr: SocketAddr,
     /// Bitcoin node RPC pass
     #[arg(long)]
     rpc_pass: String,
@@ -59,7 +66,7 @@ enum Error {
     #[error("Error deserializing tx")]
     BitcoinDeserialize(#[from] bitcoin::consensus::encode::FromHexError),
     #[error(transparent)]
-    Rpc(#[from] RpcError),
+    Rpc(#[from] jsonrpsee::core::ClientError),
     #[error(transparent)]
     Zmq(#[from] ZmqError),
     #[error("ZMQ stream ended unexpectedly")]
@@ -67,25 +74,34 @@ enum Error {
 }
 
 async fn get_spent_outputs(
-    rpc_client: &RpcClient,
+    rpc_client: &HttpClient,
     block: &bitcoin::Block,
 ) -> Result<HashMap<bitcoin::Txid, bitcoin::Transaction>, Error> {
+    const MAX_CONCURRENT_REQUESTS: usize = 15;
     // txs needed to get spent outputs
     let txs_needed: HashSet<_> = block
         .txdata
         .iter()
+        .filter(|tx| !tx.is_coinbase())
         .flat_map(|tx| tx.input.iter().map(|input| input.previous_output.txid))
         .collect();
-    txs_needed
+    tracing::debug!("requesting {} raw txs...", txs_needed.len());
+    let futs = txs_needed
         .into_iter()
         .map(|txid| async move {
             let txid_bytes: [u8; 32] = *txid.as_ref();
-            let rpc_txid = sapio_bitcoin::Txid::from_inner(txid_bytes);
-            let tx_hex = rpc_client.get_raw_transaction_hex(&rpc_txid, None).await?;
+            let rpc_txid = bitcoin_0_31::Txid::from_byte_array(txid_bytes);
+            tracing::debug!("getting raw tx for {txid}...");
+            let tx_hex = rpc_client.get_raw_transaction(rpc_txid,
+                GetRawTransactionVerbose::<false>,
+                None
+            ).await?;
+            tracing::debug!("received raw tx for {txid}");
             let tx = bitcoin::consensus::encode::deserialize_hex(&tx_hex)?;
             Ok((txid, tx))
-        })
-        .collect::<FuturesUnordered<_>>()
+        });
+    stream::iter(futs)
+        .buffer_unordered(MAX_CONCURRENT_REQUESTS)
         .try_collect::<HashMap<_, _>>()
         .await
 }
@@ -116,9 +132,14 @@ fn validate_tx(
     true
 }
 
-async fn validate_block(rpc_client: &RpcClient, block: &bitcoin::Block) -> Result<bool, Error> {
+async fn validate_block(rpc_client: &HttpClient, block: &bitcoin::Block) -> Result<bool, Error> {
+    tracing::debug!("getting spent outputs for {}...", block.block_hash());
     let spent_outputs = get_spent_outputs(rpc_client, block).await?;
+    tracing::debug!("received spent outputs for {}...", block.block_hash());
     for tx in &block.txdata {
+        if tx.is_coinbase() {
+            continue;
+        }
         if validate_tx(tx, &spent_outputs) {
             continue;
         } else {
@@ -130,15 +151,19 @@ async fn validate_block(rpc_client: &RpcClient, block: &bitcoin::Block) -> Resul
 
 async fn handle_zmq(
     mut zmq_rx: bitcoincore_zmq::MessageStream,
-    rpc_client: RpcClient,
+    rpc_client: HttpClient,
 ) -> Result<(), Error> {
     while let Some(zmq_msg) = zmq_rx.try_next().await? {
         match zmq_msg {
             ZmqMessage::Block(block, _seq) => {
+                tracing::debug!("Validating block...");
                 if !validate_block(&rpc_client, &block).await? {
-                    let block_hash: [u8; 32] = *block.block_hash().as_ref();
-                    let block_hash = sapio_bitcoin::hash_types::BlockHash::from_inner(block_hash);
-                    rpc_client.invalidate_block(&block_hash).await?;
+                    let block_hash = block.block_hash();
+                    tracing::warn!("Invalidating block {block_hash}");
+                    let block_hash: [u8; 32] = *block_hash.as_ref();
+                    let block_hash = bitcoin_0_31::BlockHash::from_byte_array(block_hash);
+                    // FIXME: re-enable
+                    //rpc_client.invalidate_block(block_hash).await?;
                 }
             }
             ZmqMessage::HashBlock(..)
@@ -155,13 +180,15 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     set_tracing_subscriber(cli.log_level)?;
     let rpc_client = {
-        let auth = RpcAuth::UserPass(cli.rpc_user, cli.rpc_pass);
-        let client = RpcClient::new(cli.rpc_addr, auth).await?;
+        const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+        let client = bip300301::client(cli.rpc_addr, &cli.rpc_pass, Some(REQUEST_TIMEOUT), &cli.rpc_user)?;
         // get RPC version to check that RPC client is configured correctly
-        let _version: usize = client.version().await?;
+        let _network_info = client.get_network_info().await?;
+        tracing::debug!("connected to RPC server");
         client
     };
     let zmq_rx = subscribe_zmq(&cli.zmq_addr_rawblock)?;
+    tracing::debug!("subscribed to rawblock");
     let () = handle_zmq(zmq_rx, rpc_client).await?;
     Ok(())
 }
