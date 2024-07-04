@@ -1,2 +1,0 @@
-//! Bitcoin RPC client
-

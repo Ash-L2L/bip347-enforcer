@@ -65,6 +65,7 @@ fn main() {
         .compile("bitcoin-script.a");
 
     println!("cargo:include=depends/bitcoin/src");
+    println!("cargo:rerun-if-changed=stubs/bitcoin-script.cpp");
     println!("cargo:rustc-link-lib=static=secp256k1");
     println!("cargo:rustc-link-search=native=depends/bitcoin/src/.libs");
     println!("cargo:rustc-link-search=native={}", out_dir);

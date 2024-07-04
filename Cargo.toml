@@ -24,3 +24,6 @@ tracing-subscriber = "0.3.18"
 git = "https://github.com/Ash-L2L/bip300301.git"
 rev = "8ce8316c6bf58b54b95c36b439402f2bb5f2a8dd"
 features = ["tracing"]
+
+[dev-dependencies]
+bitcoin = { version = "0.32.2", features = ["bitcoinconsensus", "rand"] }

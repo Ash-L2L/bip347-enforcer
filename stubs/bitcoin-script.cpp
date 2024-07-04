@@ -1,3 +1,4 @@
+#include <iostream>
 #include <vector>
 
 #include <policy/policy.h>
@@ -8,8 +9,16 @@
 #include <streams.h>
 
 extern "C" {
+    unsigned int mandatory_script_verify_flags() {
+        return MANDATORY_SCRIPT_VERIFY_FLAGS;
+    }
+
     unsigned int standard_script_verify_flags() {
         return STANDARD_SCRIPT_VERIFY_FLAGS;
+    }
+
+    unsigned int op_cat_verify_flag() {
+        return SCRIPT_VERIFY_OP_CAT;
     }
 
     bool verify_script(const uint8_t* scriptPubKey, uint32_t scriptPubKeyLen,
@@ -22,8 +31,6 @@ extern "C" {
 
         // Parse the transaction
         DataStream stream(vtxTo);
-        //CMutableTransaction mtx;
-        //stream >> mtx;
         const CTransaction tx(deserialize, TX_WITH_WITNESS, stream);
 
         // Verify the script
