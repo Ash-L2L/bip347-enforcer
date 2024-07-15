@@ -73,10 +73,9 @@ pub fn verify_tx(
     };
     for (idx, input) in tx.input.iter().enumerate() {
         let spent_output = get_spent_output(&input.previous_output);
-        let spk_encoded =
-            bitcoin::consensus::serialize(&spent_output.script_pubkey);
+        let spk_encoded = &spent_output.script_pubkey.to_bytes();
         if !verify(
-            &spk_encoded,
+            spk_encoded,
             &tx_encoded,
             idx as u32,
             flags,
@@ -92,17 +91,60 @@ pub fn verify_tx(
 
 #[cfg(test)]
 mod test {
+    use anyhow::anyhow;
     use bitcoin::{
         absolute::LockTime,
         ecdsa::Signature,
+        hex::FromHex,
+        opcodes::all::{OP_CAT, OP_EQUAL},
         secp256k1::{rand::rngs::OsRng, Secp256k1},
         sighash::SighashCache,
+        taproot::{LeafVersion, TaprootBuilder},
         transaction::Version,
-        Amount, EcdsaSighashType, OutPoint, PublicKey, ScriptBuf, Sequence,
-        Transaction, TxIn, TxOut, Witness,
+        Amount, EcdsaSighashType, OutPoint, PublicKey, ScriptBuf, Transaction,
+        TxIn, TxOut, Witness,
     };
 
     use super::*;
+
+    /// Generate a tx with 0 inputs and 1 output,
+    /// with the specified scriptpubkey.
+    fn tx_0_in_1_out(script_pubkey: ScriptBuf, value: Amount) -> Transaction {
+        let txout = TxOut {
+            value,
+            script_pubkey,
+        };
+        Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::from_height(1).unwrap(),
+            input: Vec::new(),
+            output: vec![txout],
+        }
+    }
+
+    /// Generate a tx with 1 input and 1 output,
+    /// with the specified scriptpubkey and value.
+    /// The tx input does not include a script sig or witness.
+    fn tx_1_in_1_out(
+        previous_output: OutPoint,
+        script_pubkey: ScriptBuf,
+        value: Amount,
+    ) -> Transaction {
+        let txin = TxIn {
+            previous_output,
+            ..Default::default()
+        };
+        let txout = TxOut {
+            value,
+            script_pubkey,
+        };
+        Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::from_height(1).unwrap(),
+            input: vec![txin],
+            output: vec![txout],
+        }
+    }
 
     #[test]
     fn verify_1_in_1_out() -> anyhow::Result<()> {
@@ -112,42 +154,20 @@ mod test {
         let wpkh = pk.wpubkey_hash()?;
         let spk = ScriptBuf::new_p2wpkh(&wpkh);
         let value = Amount::from_int_btc(123);
-        let source_txout = TxOut {
-            value,
-            script_pubkey: spk.clone(),
-        };
         // source tx for the input
-        let source_tx = Transaction {
-            version: Version::TWO,
-            lock_time: LockTime::from_height(1)?,
-            input: Vec::new(),
-            output: vec![source_txout.clone()],
-        };
-        let source_outpoint = OutPoint {
-            txid: source_tx.compute_txid(),
-            vout: 0,
-        };
-        let txin = TxIn {
-            previous_output: source_outpoint,
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::default(),
-            witness: Witness::new(),
-        };
-        let txout = TxOut {
-            value,
-            script_pubkey: spk.clone(),
-        };
-        let tx = Transaction {
-            version: Version::TWO,
-            lock_time: LockTime::from_height(1)?,
-            input: vec![txin],
-            output: vec![txout],
+        let source_tx = tx_0_in_1_out(spk.clone(), value);
+        let tx = {
+            let previous_output = OutPoint {
+                txid: source_tx.compute_txid(),
+                vout: 0,
+            };
+            tx_1_in_1_out(previous_output, spk.clone(), value)
         };
         let mut sighash_cache = SighashCache::new(tx);
         let sighash = sighash_cache.p2wpkh_signature_hash(
             0,
             &spk,
-            value,
+            sighash_cache.transaction().output[0].value,
             EcdsaSighashType::All,
         )?;
         let mut sig = Secp256k1::new().sign_ecdsa_low_r(&sighash.into(), &sk);
@@ -170,6 +190,242 @@ mod test {
 
         // verify tx
         assert!(verify_tx(&tx, &spent_outputs, op_cat_verify_flag()));
+        Ok(())
+    }
+
+    // OP_CAT on an empty stack should fail if OP_CAT is enabled,
+    // and succeed if disabled
+    #[test]
+    fn verify_op_cat_empty_stack() -> anyhow::Result<()> {
+        let secp = Secp256k1::new();
+        let (_sk, pk) = secp.generate_keypair(&mut OsRng);
+        let pk: PublicKey = pk.into();
+        let script = ScriptBuf::builder().push_opcode(OP_CAT).into_script();
+        let tr_spend_info = TaprootBuilder::new()
+            .add_leaf(0, script.clone())?
+            .finalize(&secp, pk.into())
+            .map_err(|_| {
+                anyhow::anyhow!("failed to finalize taproot script")
+            })?;
+        let spk = ScriptBuf::new_p2tr_tweaked(tr_spend_info.output_key());
+        let value = Amount::from_int_btc(123);
+        // source tx for the input
+        let source_tx = tx_0_in_1_out(spk.clone(), value);
+        let tx = {
+            let previous_output = OutPoint {
+                txid: source_tx.compute_txid(),
+                vout: 0,
+            };
+            tx_1_in_1_out(previous_output, spk.clone(), value)
+        };
+        let mut sighash_cache = SighashCache::new(tx);
+        let control_block = tr_spend_info
+            .control_block(&(script.clone(), LeafVersion::TapScript))
+            .ok_or(anyhow!("Expected a control block"))?;
+        assert!(control_block.verify_taproot_commitment(
+            &secp,
+            tr_spend_info.output_key().into(),
+            &script
+        ));
+        let mut wit = Witness::new();
+        wit.push(script);
+        wit.push(control_block.serialize());
+        let txin_0_wit = sighash_cache
+            .witness_mut(0)
+            .ok_or(anyhow::anyhow!("Failed to get witness for txin 0"))?;
+        *txin_0_wit = wit;
+        let tx = sighash_cache.into_transaction();
+        let spent_outputs: HashMap<bitcoin::Txid, Transaction> =
+            HashMap::from_iter([(source_tx.compute_txid(), source_tx)]);
+        // verify tx without OP_CAT enabled should work
+        assert!(verify_tx(
+            &tx,
+            &spent_outputs,
+            standard_script_verify_flags() ^ op_cat_verify_flag()
+        ));
+        // verify tx with OP_CAT enabled should fail
+        assert!(!verify_tx(
+            &tx,
+            &spent_outputs,
+            standard_script_verify_flags()
+        ));
+        Ok(())
+    }
+
+    // OP_CAT on a stack with two elements should succeed if OP_CAT is enabled
+    #[test]
+    fn verify_op_cat_two_elements() -> anyhow::Result<()> {
+        let secp = Secp256k1::new();
+        let (_sk, pk) = secp.generate_keypair(&mut OsRng);
+        let pk: PublicKey = pk.into();
+        let script = ScriptBuf::builder().push_opcode(OP_CAT).into_script();
+        let tr_spend_info = TaprootBuilder::new()
+            .add_leaf(0, script.clone())?
+            .finalize(&secp, pk.into())
+            .map_err(|_| {
+                anyhow::anyhow!("failed to finalize taproot script")
+            })?;
+        let spk = ScriptBuf::new_p2tr_tweaked(tr_spend_info.output_key());
+        let value = Amount::from_int_btc(123);
+        // source tx for the input
+        let source_tx = tx_0_in_1_out(spk.clone(), value);
+        let tx = {
+            let previous_output = OutPoint {
+                txid: source_tx.compute_txid(),
+                vout: 0,
+            };
+            tx_1_in_1_out(previous_output, spk.clone(), value)
+        };
+        let mut sighash_cache = SighashCache::new(tx);
+        let control_block = tr_spend_info
+            .control_block(&(script.clone(), LeafVersion::TapScript))
+            .ok_or(anyhow!("Expected a control block"))?;
+        assert!(control_block.verify_taproot_commitment(
+            &secp,
+            tr_spend_info.output_key().into(),
+            &script
+        ));
+        let mut wit = Witness::new();
+        wit.push([0xaa]);
+        wit.push([0xbb]);
+        wit.push(script);
+        wit.push(control_block.serialize());
+        let txin_0_wit = sighash_cache
+            .witness_mut(0)
+            .ok_or(anyhow::anyhow!("Failed to get witness for txin 0"))?;
+        *txin_0_wit = wit;
+        let tx = sighash_cache.into_transaction();
+        let spent_outputs: HashMap<bitcoin::Txid, Transaction> =
+            HashMap::from_iter([(source_tx.compute_txid(), source_tx)]);
+        // verify tx with OP_CAT enabled should succeed
+        assert!(verify_tx(
+            &tx,
+            &spent_outputs,
+            standard_script_verify_flags()
+        ));
+        Ok(())
+    }
+
+    // OP_CAT on a stack with two elements, compared with their concatenation,
+    // should succeed if OP_CAT is enabled
+    #[test]
+    fn verify_op_cat_two_elements_eq() -> anyhow::Result<()> {
+        let secp = Secp256k1::new();
+        let (_sk, pk) = secp.generate_keypair(&mut OsRng);
+        let pk: PublicKey = pk.into();
+        let script = ScriptBuf::builder()
+            .push_opcode(OP_CAT)
+            .push_opcode(OP_EQUAL)
+            .into_script();
+        let tr_spend_info = TaprootBuilder::new()
+            .add_leaf(0, script.clone())?
+            .finalize(&secp, pk.into())
+            .map_err(|_| {
+                anyhow::anyhow!("failed to finalize taproot script")
+            })?;
+        let spk = ScriptBuf::new_p2tr_tweaked(tr_spend_info.output_key());
+        let value = Amount::from_int_btc(123);
+        let source_tx = tx_0_in_1_out(spk.clone(), value);
+        let tx = {
+            let previous_output = OutPoint {
+                txid: source_tx.compute_txid(),
+                vout: 0,
+            };
+            tx_1_in_1_out(previous_output, spk.clone(), value)
+        };
+        let mut sighash_cache = SighashCache::new(tx);
+        let control_block = tr_spend_info
+            .control_block(&(script.clone(), LeafVersion::TapScript))
+            .ok_or(anyhow!("Expected a control block"))?;
+        assert!(control_block.verify_taproot_commitment(
+            &secp,
+            tr_spend_info.output_key().into(),
+            &script
+        ));
+        let mut wit = Witness::new();
+        wit.push(Vec::<u8>::from_hex("78a11a1260c1101260")?);
+        wit.push(Vec::<u8>::from_hex("78a11a1260")?);
+        wit.push(Vec::<u8>::from_hex("c1101260")?);
+        wit.push(script);
+        wit.push(control_block.serialize());
+        let txin_0_wit = sighash_cache
+            .witness_mut(0)
+            .ok_or(anyhow::anyhow!("Failed to get witness for txin 0"))?;
+        *txin_0_wit = wit;
+        let tx = sighash_cache.into_transaction();
+        let spent_outputs: HashMap<bitcoin::Txid, Transaction> =
+            HashMap::from_iter([(source_tx.compute_txid(), source_tx)]);
+        // verify tx with OP_CAT enabled should succeed
+        assert!(verify_tx(
+            &tx,
+            &spent_outputs,
+            standard_script_verify_flags()
+        ));
+        Ok(())
+    }
+
+    // OP_CAT on a stack with two elements, compared with something other than
+    // their concatenation, should fail if OP_CAT is enabled, and succeed
+    // if OP_CAT is not enabled
+    #[test]
+    fn verify_op_cat_two_elements_neq() -> anyhow::Result<()> {
+        let secp = Secp256k1::new();
+        let (_sk, pk) = secp.generate_keypair(&mut OsRng);
+        let pk: PublicKey = pk.into();
+        let script = ScriptBuf::builder()
+            .push_opcode(OP_CAT)
+            .push_opcode(OP_EQUAL)
+            .into_script();
+        let tr_spend_info = TaprootBuilder::new()
+            .add_leaf(0, script.clone())?
+            .finalize(&secp, pk.into())
+            .map_err(|_| {
+                anyhow::anyhow!("failed to finalize taproot script")
+            })?;
+        let spk = ScriptBuf::new_p2tr_tweaked(tr_spend_info.output_key());
+        let value = Amount::from_int_btc(123);
+        let source_tx = tx_0_in_1_out(spk.clone(), value);
+        let tx = {
+            let previous_output = OutPoint {
+                txid: source_tx.compute_txid(),
+                vout: 0,
+            };
+            tx_1_in_1_out(previous_output, spk.clone(), value)
+        };
+        let mut sighash_cache = SighashCache::new(tx);
+        let control_block = tr_spend_info
+            .control_block(&(script.clone(), LeafVersion::TapScript))
+            .ok_or(anyhow!("Expected a control block"))?;
+        assert!(control_block.verify_taproot_commitment(
+            &secp,
+            tr_spend_info.output_key().into(),
+            &script
+        ));
+        let mut wit = Witness::new();
+        wit.push(Vec::<u8>::from_hex("")?);
+        wit.push(Vec::<u8>::from_hex("78a11a1260")?);
+        wit.push(Vec::<u8>::from_hex("c1101260")?);
+        wit.push(script);
+        wit.push(control_block.serialize());
+        let txin_0_wit = sighash_cache
+            .witness_mut(0)
+            .ok_or(anyhow::anyhow!("Failed to get witness for txin 0"))?;
+        *txin_0_wit = wit;
+        let tx = sighash_cache.into_transaction();
+        let spent_outputs: HashMap<bitcoin::Txid, Transaction> =
+            HashMap::from_iter([(source_tx.compute_txid(), source_tx)]);
+        // verify tx with OP_CAT disabled should succeed
+        assert!(verify_tx(
+            &tx,
+            &spent_outputs,
+            standard_script_verify_flags() ^ op_cat_verify_flag()
+        ));
+        // verify tx with OP_CAT enabled should fail
+        assert!(!verify_tx(
+            &tx,
+            &spent_outputs,
+            standard_script_verify_flags()
+        ));
         Ok(())
     }
 }
