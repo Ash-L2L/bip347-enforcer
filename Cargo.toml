@@ -8,13 +8,14 @@ cc = "1.0.101"
 
 [dependencies]
 anyhow = "1.0.86"
-bitcoin = "0.32.2"
+bitcoin = { version = "0.32.2", features = ["rand", "serde"] }
 bitcoin_0_31 = { package = "bitcoin", version = "0.31.1" }
 bitcoincore-zmq = { version = "1.5.0", features = ["async"] }
 clap = { version = "4.5.7", features = ["derive"] }
 futures = "0.3.30"
 jsonrpsee = "0.23.2"
 libc = "0.2.155"
+serde_json = "1.0.120"
 thiserror = "1.0.61"
 tokio = { version = "1.38.0", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1.40"
@@ -26,4 +27,8 @@ rev = "8ce8316c6bf58b54b95c36b439402f2bb5f2a8dd"
 features = ["tracing"]
 
 [dev-dependencies]
-bitcoin = { version = "0.32.2", features = ["bitcoinconsensus", "rand"] }
+bitcoin = { version = "0.32.2", features = ["bitcoinconsensus"] }
+
+[[bin]]
+name = "gen-demo-tx"
+path = "src/gen_tx.rs"

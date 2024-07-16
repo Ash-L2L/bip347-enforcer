@@ -5,7 +5,7 @@
 * Install dependencies (rustup)
 * Clone this repository
 * Init submodules `git submodule update --init --recursive`
-* Build with `cargo build`
+* Build with `cargo build` or `cargo build --release`
 
 ## Configure Bitcoin node
 * Must use a version of Bitcoin Core more recent than `75118a608fc22a57567743000d636bc1f969f748`.

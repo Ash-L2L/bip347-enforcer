@@ -54,13 +54,16 @@ jobs:
           APP_VERSION=$(cargo metadata --format-version 1 | \
             jq -er '.packages | map(select(.name == "bip347-enforcer") | .version) | .[0]')
           APP_FILENAME="bip347-enforcer-${APP_VERSION}-x86_64-unknown-linux-gnu"
+          DEMO_FILENAME="gen-demo-tx-${APP_VERSION}-x86_64-unknown-linux-gnu"
           echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
           echo "APP_FILENAME=$APP_FILENAME" >> "$GITHUB_ENV"
+          echo "DEMO_FILENAME=$DEMO_FILENAME" >> "$GITHUB_ENV"
 
       - name: 'Set filenames for release binaries'
         run: |
           pushd "target/release"
           ln -fs "bip347-enforcer" "${APP_FILENAME}"
+          ln -fs "gen-demo-tx" "${DEMO_FILENAME}"
           popd
 
       - name: 'Upload Artifacts'
@@ -70,6 +73,7 @@ jobs:
           if-no-files-found: error
           path: |
             target/release/${{ env.APP_FILENAME }}
+            target/release/${{ env.DEMO_FILENAME }}
 
       - name: Release
         uses: softprops/action-gh-release@v2.0.2
@@ -77,6 +81,7 @@ jobs:
         with:
           files: |
             target/release/${{ env.APP_FILENAME }}
+            target/release/${{ env.DEMO_FILENAME }}
           fail_on_unmatched_files: true
   
   build-macos:
@@ -110,13 +115,16 @@ jobs:
           APP_VERSION=$(cargo metadata --format-version 1 | \
             jq -er '.packages | map(select(.name == "bip347-enforcer") | .version) | .[0]')
           APP_FILENAME="bip347-enforcer-${APP_VERSION}-x86_64-apple-darwin"
+          DEMO_FILENAME="gen-demo-tx-${APP_VERSION}-x86_64-apple-darwin"
           echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
           echo "APP_FILENAME=$APP_FILENAME" >> "$GITHUB_ENV"
+          echo "DEMO_FILENAME=$DEMO_FILENAME" >> "$GITHUB_ENV"
 
       - name: 'Set filenames for release binaries'
         run: |
           pushd "target/release"
           ln -fs "bip347-enforcer" "${APP_FILENAME}"
+          ln -fs "gen-demo-tx" "${DEMO_FILENAME}"
           popd
 
       - name: 'Upload Artifacts'
@@ -126,6 +134,7 @@ jobs:
           if-no-files-found: error
           path: |
             target/release/${{ env.APP_FILENAME }}
+            target/release/${{ env.DEMO_FILENAME }}
 
       - name: Release
         uses: softprops/action-gh-release@v2.0.2
@@ -133,6 +142,7 @@ jobs:
         with:
           files: |
             target/release/${{ env.APP_FILENAME }}
+            target/release/${{ env.DEMO_FILENAME }}
           fail_on_unmatched_files: true
 
   build-windows:
@@ -178,13 +188,16 @@ jobs:
           APP_VERSION=$(cargo metadata --format-version 1 | \
             jq -er '.packages | map(select(.name == "bip347-enforcer") | .version) | .[0]')
           APP_FILENAME="bip347-enforcer-${APP_VERSION}-x86_64-pc-windows-gnu.exe"
+          DEMO_FILENAME="gen-demo-tx-${APP_VERSION}-x86_64-pc-windows-gnu.exe"
           echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
           echo "APP_FILENAME=$APP_FILENAME" >> "$GITHUB_ENV"
+          echo "DEMO_FILENAME=$DEMO_FILENAME" >> "$GITHUB_ENV"
 
       - name: 'Set filenames for release binaries'
         run: |
           pushd "target/x86_64-pc-windows-gnu/release"
           ln -fs "bip347-enforcer.exe" "${APP_FILENAME}"
+          ln -fs "gen-demo-tx.exe" "${DEMO_FILENAME}"
           popd
 
       - name: 'Upload Artifacts'
@@ -194,6 +207,7 @@ jobs:
           if-no-files-found: error
           path: |
             target/x86_64-pc-windows-gnu/release/${{ env.APP_FILENAME }}
+            target/x86_64-pc-windows-gnu/release/${{ env.DEMO_FILENAME }}
 
       - name: Release
         uses: softprops/action-gh-release@v2.0.2
@@ -201,4 +215,5 @@ jobs:
         with:
           files: |
             target/x86_64-pc-windows-gnu/release/${{ env.APP_FILENAME }}
+            target/x86_64-pc-windows-gnu/release/${{ env.DEMO_FILENAME }}
           fail_on_unmatched_files: true
