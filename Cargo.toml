@@ -13,9 +13,14 @@ bitcoin_0_31 = { package = "bitcoin", version = "0.31.1" }
 bitcoincore-zmq = { version = "1.5.0", features = ["async"] }
 clap = { version = "4.5.7", features = ["derive"] }
 futures = "0.3.30"
+integer-sqrt = "0.1.5"
 jsonrpsee = "0.23.2"
 libc = "0.2.155"
+rand = "0.8.5"
+serde = "1.0.204"
 serde_json = "1.0.120"
+serde_path_to_error = "0.1.16"
+serde_tuple = "0.5.0"
 thiserror = "1.0.61"
 tokio = { version = "1.38.0", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1.40"
@@ -23,7 +28,7 @@ tracing-subscriber = "0.3.18"
 
 [dependencies.bip300301]
 git = "https://github.com/Ash-L2L/bip300301.git"
-rev = "8ce8316c6bf58b54b95c36b439402f2bb5f2a8dd"
+rev = "056e5700bb956cd5c20f27646499ca34f9c74531"
 features = ["tracing"]
 
 [dev-dependencies]
