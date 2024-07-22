@@ -1,9 +1,37 @@
 use std::collections::HashMap;
 
 use libc::c_uint;
+use thiserror::Error;
 
 mod ffi {
     use libc::{c_uchar, c_uint};
+
+    #[repr(C)]
+    pub(super) struct VerifyScriptResult {
+        pub success: bool,
+        pub err_msg: *const libc::c_char,
+    }
+
+    // Implement a Drop trait to ensure the C++ side frees allocated resources
+    impl Drop for VerifyScriptResult {
+        fn drop(&mut self) {
+            unsafe {
+                free_verify_script_result(self);
+            }
+        }
+    }
+
+    impl From<&VerifyScriptResult> for Result<(), String> {
+        fn from(res: &VerifyScriptResult) -> Self {
+            if res.success {
+                Ok(())
+            } else {
+                let err_c_str =
+                    unsafe { std::ffi::CStr::from_ptr(res.err_msg) };
+                Err(err_c_str.to_str().unwrap().to_owned())
+            }
+        }
+    }
 
     #[link(name = "bitcoin-script.a", kind = "static")]
     extern "C" {
@@ -23,7 +51,12 @@ mod ffi {
             nIn: c_uint,
             flags: c_uint,
             amount: i64,
-        ) -> bool;
+        ) -> *mut VerifyScriptResult;
+
+        /// MUST be called when VerifyScriptResult is dropped
+        pub(super) fn free_verify_script_result(
+            result: *mut VerifyScriptResult,
+        );
     }
 }
 
@@ -47,9 +80,9 @@ pub fn verify(
     n_in: u32,
     flags: u32,
     amount: i64,
-) -> bool {
+) -> Result<(), String> {
     unsafe {
-        ffi::verify_script(
+        &*ffi::verify_script(
             script_pub_key.as_ptr(),
             script_pub_key.len() as c_uint,
             tx_to.as_ptr(),
@@ -59,6 +92,16 @@ pub fn verify(
             amount,
         )
     }
+    .into()
+}
+
+#[derive(Debug, Error)]
+#[error("Error verifying input {input_idx}: {err_msg}")]
+pub struct VerifyTxError {
+    /// Index of the input that failed verification
+    pub input_idx: usize,
+    /// Source error message
+    pub err_msg: String,
 }
 
 /// Verify tx
@@ -66,27 +109,27 @@ pub fn verify_tx(
     tx: &bitcoin::Transaction,
     spent_outputs: &HashMap<bitcoin::Txid, bitcoin::Transaction>,
     flags: u32,
-) -> bool {
+) -> Result<(), VerifyTxError> {
     let tx_encoded = bitcoin::consensus::serialize(tx);
     let get_spent_output = |outpoint: &bitcoin::OutPoint| {
         &spent_outputs[&outpoint.txid].output[outpoint.vout as usize]
     };
-    for (idx, input) in tx.input.iter().enumerate() {
+    for (input_idx, input) in tx.input.iter().enumerate() {
         let spent_output = get_spent_output(&input.previous_output);
         let spk_encoded = &spent_output.script_pubkey.to_bytes();
-        if !verify(
+        if let Err(err_msg) = verify(
             spk_encoded,
             &tx_encoded,
-            idx as u32,
+            input_idx as u32,
             flags,
             spent_output.value.to_sat() as i64,
         ) {
-            return false;
+            return Err(VerifyTxError { input_idx, err_msg });
         } else {
             continue;
         }
     }
-    true
+    Ok(())
 }
 
 #[cfg(test)]
@@ -189,7 +232,7 @@ mod test {
         }
 
         // verify tx
-        assert!(verify_tx(&tx, &spent_outputs, op_cat_verify_flag()));
+        assert!(verify_tx(&tx, &spent_outputs, op_cat_verify_flag()).is_ok());
         Ok(())
     }
 
@@ -242,13 +285,13 @@ mod test {
             &tx,
             &spent_outputs,
             standard_script_verify_flags() ^ op_cat_verify_flag()
-        ));
+        )
+        .is_ok());
         // verify tx with OP_CAT enabled should fail
-        assert!(!verify_tx(
-            &tx,
-            &spent_outputs,
-            standard_script_verify_flags()
-        ));
+        assert!(
+            verify_tx(&tx, &spent_outputs, standard_script_verify_flags())
+                .is_err()
+        );
         Ok(())
     }
 
@@ -298,11 +341,10 @@ mod test {
         let spent_outputs: HashMap<bitcoin::Txid, Transaction> =
             HashMap::from_iter([(source_tx.compute_txid(), source_tx)]);
         // verify tx with OP_CAT enabled should succeed
-        assert!(verify_tx(
-            &tx,
-            &spent_outputs,
-            standard_script_verify_flags()
-        ));
+        assert!(
+            verify_tx(&tx, &spent_outputs, standard_script_verify_flags())
+                .is_ok()
+        );
         Ok(())
     }
 
@@ -356,11 +398,10 @@ mod test {
         let spent_outputs: HashMap<bitcoin::Txid, Transaction> =
             HashMap::from_iter([(source_tx.compute_txid(), source_tx)]);
         // verify tx with OP_CAT enabled should succeed
-        assert!(verify_tx(
-            &tx,
-            &spent_outputs,
-            standard_script_verify_flags()
-        ));
+        assert!(
+            verify_tx(&tx, &spent_outputs, standard_script_verify_flags())
+                .is_ok()
+        );
         Ok(())
     }
 
@@ -419,13 +460,13 @@ mod test {
             &tx,
             &spent_outputs,
             standard_script_verify_flags() ^ op_cat_verify_flag()
-        ));
+        )
+        .is_ok());
         // verify tx with OP_CAT enabled should fail
-        assert!(!verify_tx(
-            &tx,
-            &spent_outputs,
-            standard_script_verify_flags()
-        ));
+        assert!(
+            verify_tx(&tx, &spent_outputs, standard_script_verify_flags())
+                .is_err()
+        );
         Ok(())
     }
 }

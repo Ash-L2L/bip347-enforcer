@@ -58,6 +58,7 @@ fn main() {
         .file("depends/bitcoin/src/primitives/transaction.cpp")
         .file("depends/bitcoin/src/script/interpreter.cpp")
         .file("depends/bitcoin/src/script/script.cpp")
+        .file("depends/bitcoin/src/script/script_error.cpp")
         .file("depends/bitcoin/src/support/cleanse.cpp")
         .file("depends/bitcoin/src/uint256.cpp")
         .file("depends/bitcoin/src/util/strencodings.cpp")

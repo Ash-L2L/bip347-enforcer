@@ -9,7 +9,7 @@ use bip300301::{
     MainClient as _,
 };
 use bitcoin_0_31::hashes::Hash;
-use bitcoin_script::{op_cat_verify_flag, verify_tx};
+use bitcoin_script::{op_cat_verify_flag, verify_tx, VerifyTxError};
 use bitcoincore_zmq::{Error as ZmqError, Message as ZmqMessage};
 use clap::Parser;
 use futures::{stream, StreamExt, TryStreamExt};
@@ -108,24 +108,35 @@ async fn get_spent_outputs(
         .await
 }
 
+#[derive(Debug, Error)]
+#[error("Error verifying tx {tx_idx}")]
+pub struct VerifyBlockError {
+    pub tx_idx: usize,
+    #[source]
+    pub source: VerifyTxError,
+}
+
 async fn validate_block(
     rpc_client: &HttpClient,
     block: &bitcoin::Block,
-) -> Result<bool, Error> {
+) -> Result<Result<(), VerifyBlockError>, Error> {
     tracing::debug!("getting spent outputs for {}...", block.block_hash());
     let spent_outputs = get_spent_outputs(rpc_client, block).await?;
     tracing::debug!("received spent outputs for {}...", block.block_hash());
-    for tx in &block.txdata {
+    for (tx_idx, tx) in block.txdata.iter().enumerate() {
         if tx.is_coinbase() {
             continue;
         }
-        if verify_tx(tx, &spent_outputs, op_cat_verify_flag()) {
-            continue;
+        if let Err(err) = verify_tx(tx, &spent_outputs, op_cat_verify_flag()) {
+            return Ok(Err(VerifyBlockError {
+                tx_idx,
+                source: err,
+            }));
         } else {
-            return Ok(false);
-        }
+            continue;
+        };
     }
-    Ok(true)
+    Ok(Ok(()))
 }
 
 async fn handle_zmq(
@@ -136,9 +147,10 @@ async fn handle_zmq(
         match zmq_msg {
             ZmqMessage::Block(block, _seq) => {
                 tracing::debug!("Validating block...");
-                if !validate_block(&rpc_client, &block).await? {
+                if let Err(err) = validate_block(&rpc_client, &block).await? {
                     let block_hash = block.block_hash();
-                    tracing::warn!("Invalidating block {block_hash}");
+                    let err = anyhow::Error::from(err);
+                    tracing::warn!("Invalidating block {block_hash}: {err:#}");
                     let block_hash: [u8; 32] = *block_hash.as_ref();
                     let block_hash =
                         bitcoin_0_31::BlockHash::from_byte_array(block_hash);

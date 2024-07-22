@@ -24,8 +24,8 @@ use bitcoin::{
     taproot::{ControlBlock, LeafVersion, TaprootBuilder, TaprootError},
     transaction::Version,
     Address, Amount, Block, BlockHash, CompactTarget, Denomination, OutPoint,
-    PublicKey, ScriptBuf, Sequence, Target, Transaction, TxIn, TxMerkleNode,
-    TxOut, Txid, Witness,
+    PublicKey, Script, ScriptBuf, Sequence, Target, Transaction, TxIn,
+    TxMerkleNode, TxOut, Txid, Witness,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use integer_sqrt::IntegerSquareRoot;
@@ -529,6 +529,13 @@ fn gen_block(
     block
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InvalidReason {
+    TooFewStackItems,
+    ConcatenationExceedsStackElementSizeLimit,
+    ConcatenationNotEqual,
+}
+
 /// Generate N + 1 txs from a block spec.
 ///
 /// The first transaction spends the outpoint to generate N+1 outputs,
@@ -541,7 +548,7 @@ fn gen_txs(
     spend_outpoint: OutPoint,
     spend_outpoint_value: Amount,
     block_spec: BlockSpec,
-) -> Vec<Transaction> {
+) -> Vec<(Transaction, Option<InvalidReason>)> {
     let first_txin = TxIn {
         previous_output: spend_outpoint,
         // FIXME: check that this is correct
@@ -584,7 +591,8 @@ fn gen_txs(
         };
         vout += 1;
         let control_block = control_blocks.pop_front().unwrap();
-        res.push(too_few_stack_items_tx(spend_outpoint, control_block));
+        let tx = too_few_stack_items_tx(spend_outpoint, control_block);
+        res.push((tx, Some(InvalidReason::TooFewStackItems)));
     }
     for _ in 0..block_spec.concatenation_exceeds_stack_element_size_limit {
         let spend_outpoint = OutPoint {
@@ -593,9 +601,13 @@ fn gen_txs(
         };
         vout += 1;
         let control_block = control_blocks.pop_front().unwrap();
-        res.push(concatenation_exceeds_stack_element_size_limit_tx(
+        let tx = concatenation_exceeds_stack_element_size_limit_tx(
             spend_outpoint,
             control_block,
+        );
+        res.push((
+            tx,
+            Some(InvalidReason::ConcatenationExceedsStackElementSizeLimit),
         ));
     }
     for _ in 0..block_spec.concatenation_not_equal {
@@ -605,12 +617,13 @@ fn gen_txs(
         };
         vout += 1;
         let control_block = control_blocks.pop_front().unwrap();
-        res.push(concatenation_not_equal_tx(spend_outpoint, control_block));
+        let tx = concatenation_not_equal_tx(spend_outpoint, control_block);
+        res.push((tx, Some(InvalidReason::ConcatenationNotEqual)));
     }
     // Randomize order
     res.shuffle(&mut OsRng);
     // Add first tx and reverse so that it is first in the result
-    res.push(first_tx);
+    res.push((first_tx, None));
     res.reverse();
     res
 }
@@ -625,6 +638,58 @@ fn block_subsidy(network: bitcoin::Network, height: u32) -> Amount {
     };
     let epoch = height / halving_interval;
     Amount::from_int_btc(50) / (1 << epoch)
+}
+
+fn explain_tx_invalid(
+    tx: &Transaction,
+    invalid_reason: InvalidReason,
+) -> String {
+    let mut res = Vec::new();
+    let tx_json = serde_json::to_string(&tx).unwrap();
+    res.push(format!("tx JSON: {tx_json}"));
+    let witness = &tx.input[0].witness;
+    res.push(format!(
+        "witness script: {}",
+        Script::from_bytes(witness.second_to_last().unwrap()).to_asm_string()
+    ));
+    match invalid_reason {
+        InvalidReason::TooFewStackItems => {
+            let witness_stack_size = witness.len() - 2;
+            res.push(format!("witness stack size: {witness_stack_size}"));
+            for idx in 0..witness_stack_size {
+                let stack_item =
+                    witness.nth(witness_stack_size - 1 - idx).unwrap();
+                res.push(format!(
+                    "witness stack item {idx}: {}",
+                    stack_item.to_lower_hex_string()
+                ));
+            }
+        }
+        InvalidReason::ConcatenationExceedsStackElementSizeLimit => {
+            const WITNESS_STACK_SIZE: usize = 2;
+            for idx in 0..WITNESS_STACK_SIZE {
+                let stack_item =
+                    witness.nth(WITNESS_STACK_SIZE - 1 - idx).unwrap();
+                res.push(format!(
+                    "witness stack item {idx} ({} bytes): {}",
+                    stack_item.len(),
+                    stack_item.to_lower_hex_string()
+                ));
+            }
+        }
+        InvalidReason::ConcatenationNotEqual => {
+            const WITNESS_STACK_SIZE: usize = 3;
+            for idx in 0..WITNESS_STACK_SIZE {
+                let stack_item =
+                    witness.nth(WITNESS_STACK_SIZE - 1 - idx).unwrap();
+                res.push(format!(
+                    "witness stack item {idx}: {}",
+                    stack_item.to_lower_hex_string()
+                ));
+            }
+        }
+    }
+    res.join("\n")
 }
 
 async fn gen_script(
@@ -696,19 +761,37 @@ async fn gen_script(
     for block_spec in blocks_spec.0.into_iter() {
         let txs = gen_txs(spend_outpoint, spend_outpoint_value, block_spec);
         spend_outpoint = OutPoint {
-            txid: txs[0].compute_txid(),
-            vout: txs[0].output.len() as u32 - 1,
+            txid: txs[0].0.compute_txid(),
+            vout: txs[0].0.output.len() as u32 - 1,
         };
-        spend_outpoint_value = txs[0].output.last().unwrap().value;
+        spend_outpoint_value = txs[0].0.output.last().unwrap().value;
         let raw_txs: Vec<_> = txs
             .iter()
-            .map(|tx| bitcoin::consensus::serialize(tx).to_lower_hex_string())
+            .map(|(tx, _)| {
+                bitcoin::consensus::serialize(tx).to_lower_hex_string()
+            })
             .collect();
+        let mut comment = format!(
+            "Generate a block with {} failing txs: \n\
+             - {} txs with too few stack items\n\
+             - {} txs where the concatenation of two stack items exceeds the stack item size limit\n\
+             - {} txs where the concatenation of two stack items is not equal to the third",
+            block_spec.txs_required(),
+            block_spec.too_few_stack_items,
+            block_spec.concatenation_exceeds_stack_element_size_limit,
+            block_spec.concatenation_not_equal
+        );
+        for (idx, (tx, invalid_reason)) in txs.iter().enumerate() {
+            let Some(invalid_reason) = invalid_reason else {
+                continue;
+            };
+            comment.push_str(&format!(
+                "\n\ntx {idx}:\n{}",
+                explain_tx_invalid(tx, *invalid_reason)
+            ));
+        }
         posix_script_builder.curl_rpc(
-            Some(&format!(
-                "Generate a block with {} failing txs",
-                block_spec.txs_required()
-            )),
+            Some(&comment),
             "generateblock",
             serde_json::json!([addr.to_string(), raw_txs]),
         );
