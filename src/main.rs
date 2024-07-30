@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     net::SocketAddr,
     time::Duration,
@@ -8,14 +9,18 @@ use bip300301::{
     client::{GetRawTransactionClient, GetRawTransactionVerbose},
     MainClient as _,
 };
+use bitcoin::Block;
 use bitcoin_0_31::hashes::Hash;
 use bitcoin_script::{op_cat_verify_flag, verify_tx, VerifyTxError};
-use bitcoincore_zmq::{Error as ZmqError, Message as ZmqMessage};
 use clap::Parser;
-use futures::{stream, StreamExt, TryStreamExt};
+use futures::{
+    stream::{self, BoxStream},
+    StreamExt, TryStream, TryStreamExt,
+};
 use jsonrpsee::http_client::HttpClient;
 use thiserror::Error;
 use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
+use zeromq::{Socket, SocketRecv, ZmqError, ZmqMessage};
 
 mod bitcoin_script;
 
@@ -53,19 +58,113 @@ fn set_tracing_subscriber(log_level: tracing::Level) -> anyhow::Result<()> {
     })
 }
 
-fn subscribe_zmq(
+struct RawBlockMessage {
+    block: Block,
+    seq: u32,
+}
+
+#[derive(Debug, Error)]
+enum DeserializeRawBlockMessageError {
+    #[error("Failed to deserialize block")]
+    DeserializeBlock(#[from] bitcoin::consensus::encode::Error),
+    #[error("Failed to deserialize sequence")]
+    DeserializeSeq(#[source] <[u8; 4] as TryFrom<&'static [u8]>>::Error),
+    #[error("Missing block (second frame)")]
+    MissingBlock,
+    #[error(r#"Missing prefix; first frame must be `b"rawblock"`"#)]
+    MissingPrefix,
+    #[error("Missing sequence (third frame)")]
+    MissingSeq,
+    #[error(r#"Wrong prefix; first frame must be `b"rawblock"`"#)]
+    WrongPrefix,
+}
+
+impl TryFrom<ZmqMessage> for RawBlockMessage {
+    type Error = DeserializeRawBlockMessageError;
+
+    fn try_from(msg: ZmqMessage) -> Result<Self, Self::Error> {
+        let mut msg = msg.into_vecdeque();
+        let Some(prefix) = msg.pop_front() else {
+            return Err(Self::Error::MissingPrefix);
+        };
+        if *prefix != *b"rawblock" {
+            return Err(Self::Error::WrongPrefix);
+        };
+        let Some(block) = msg.pop_front() else {
+            return Err(Self::Error::MissingBlock);
+        };
+        let block = bitcoin::consensus::deserialize(&block)?;
+        let Some(seq_bytes) = msg.pop_front() else {
+            return Err(Self::Error::MissingSeq);
+        };
+        let seq = u32::from_le_bytes(
+            (*seq_bytes)
+                .try_into()
+                .map_err(Self::Error::DeserializeSeq)?,
+        );
+        Ok(Self { block, seq })
+    }
+}
+
+#[derive(Debug, Error)]
+enum RawBlockStreamError {
+    #[error("Error deserializing message")]
+    Deserialize(#[from] DeserializeRawBlockMessageError),
+    #[error("Missing message with sequence {0}")]
+    MissingMessage(u32),
+    #[error("ZMQ error")]
+    Zmq(#[from] ZmqError),
+}
+
+#[tracing::instrument]
+async fn subscribe_zmq_native(
     zmq_addr_rawblock: &str,
-) -> Result<bitcoincore_zmq::MessageStream, bitcoincore_zmq::Error> {
-    tracing::debug!(
-        "Attempting to subscribe to rawblock on `{zmq_addr_rawblock}`"
-    );
-    bitcoincore_zmq::subscribe_async(&[zmq_addr_rawblock])
+) -> Result<BoxStream<Result<Block, RawBlockStreamError>>, ZmqError> {
+    tracing::debug!("Attempting to connect to ZMQ server...");
+    let mut socket = zeromq::SubSocket::new();
+    socket.connect(zmq_addr_rawblock).await?;
+    tracing::info!("Connected to ZMQ server");
+    tracing::debug!("Attempting to subscribe to `rawblock` topic...");
+    socket.subscribe("rawblock").await?;
+    tracing::info!("Subscribed to `rawblock`");
+    let res = stream::try_unfold(socket, |mut socket| async {
+        let msg: RawBlockMessage = socket.recv().await?.try_into()?;
+        Ok(Some((msg, socket)))
+    })
+    .try_filter_map({
+        let mut next_seq: Option<u32> = None;
+        move |raw_block_msg| {
+            let res = match next_seq {
+                None => {
+                    next_seq = Some(raw_block_msg.seq + 1);
+                    Ok(Some(raw_block_msg.block))
+                }
+                Some(ref mut next_seq) => {
+                    match raw_block_msg.seq.cmp(next_seq) {
+                        Ordering::Less => Ok(None),
+                        Ordering::Equal => {
+                            *next_seq = raw_block_msg.seq + 1;
+                            Ok(Some(raw_block_msg.block))
+                        }
+                        Ordering::Greater => {
+                            Err(RawBlockStreamError::MissingMessage(*next_seq))
+                        }
+                    }
+                }
+            };
+            async { res }
+        }
+    })
+    .boxed();
+    Ok(res)
 }
 
 #[derive(Debug, Error)]
 enum Error {
     #[error("Error deserializing tx")]
     BitcoinDeserialize(#[from] bitcoin::consensus::encode::FromHexError),
+    #[error(transparent)]
+    RawBlockStream(#[from] RawBlockStreamError),
     #[error(transparent)]
     Rpc(#[from] jsonrpsee::core::ClientError),
     #[error(transparent)]
@@ -139,28 +238,23 @@ async fn validate_block(
     Ok(Ok(()))
 }
 
-async fn handle_zmq(
-    mut zmq_rx: bitcoincore_zmq::MessageStream,
+async fn handle_raw_blocks<RawBlockStream>(
+    mut raw_blocks: RawBlockStream,
     rpc_client: HttpClient,
-) -> Result<(), Error> {
-    while let Some(zmq_msg) = zmq_rx.try_next().await? {
-        match zmq_msg {
-            ZmqMessage::Block(block, _seq) => {
-                tracing::debug!("Validating block...");
-                if let Err(err) = validate_block(&rpc_client, &block).await? {
-                    let block_hash = block.block_hash();
-                    let err = anyhow::Error::from(err);
-                    tracing::warn!("Invalidating block {block_hash}: {err:#}");
-                    let block_hash: [u8; 32] = *block_hash.as_ref();
-                    let block_hash =
-                        bitcoin_0_31::BlockHash::from_byte_array(block_hash);
-                    rpc_client.invalidate_block(block_hash).await?;
-                }
-            }
-            ZmqMessage::HashBlock(..)
-            | ZmqMessage::HashTx(..)
-            | ZmqMessage::Sequence(..)
-            | ZmqMessage::Tx(..) => (),
+) -> Result<(), Error>
+where
+    RawBlockStream: TryStream<Ok = Block, Error = RawBlockStreamError> + Unpin,
+{
+    while let Some(block) = raw_blocks.try_next().await? {
+        let block_hash = block.block_hash();
+        tracing::debug!("Validating block {block_hash}...");
+        if let Err(err) = validate_block(&rpc_client, &block).await? {
+            let err = anyhow::Error::from(err);
+            tracing::warn!("Invalidating block {block_hash}: {err:#}");
+            let block_hash: [u8; 32] = *block_hash.as_ref();
+            let block_hash =
+                bitcoin_0_31::BlockHash::from_byte_array(block_hash);
+            rpc_client.invalidate_block(block_hash).await?;
         }
     }
     Err(Error::ZmqStreamEnd)
@@ -183,8 +277,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::debug!("connected to RPC server");
         client
     };
-    let zmq_rx = subscribe_zmq(&cli.zmq_addr_rawblock)?;
-    tracing::debug!("subscribed to rawblock");
-    let () = handle_zmq(zmq_rx, rpc_client).await?;
+    //let zmq_rx = subscribe_zmq(&cli.zmq_addr_rawblock)?;
+    //tracing::debug!("subscribed to rawblock");
+    let raw_blocks = subscribe_zmq_native(&cli.zmq_addr_rawblock).await?;
+    //let () = handle_zmq(zmq_rx, rpc_client).await?;
+    let () = handle_raw_blocks(raw_blocks, rpc_client).await?;
     Ok(())
 }

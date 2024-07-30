@@ -10,7 +10,6 @@ cc = "1.0.101"
 anyhow = "1.0.86"
 bitcoin = { version = "0.32.2", features = ["rand", "serde"] }
 bitcoin_0_31 = { package = "bitcoin", version = "0.31.1" }
-bitcoincore-zmq = { version = "1.5.0", features = ["async"] }
 clap = { version = "4.5.7", features = ["derive"] }
 futures = "0.3.30"
 integer-sqrt = "0.1.5"
@@ -25,6 +24,7 @@ thiserror = "1.0.61"
 tokio = { version = "1.38.0", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
+zeromq = "0.4.0"
 
 [dependencies.bip300301]
 git = "https://github.com/Ash-L2L/bip300301.git"
