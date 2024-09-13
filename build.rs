@@ -1,7 +1,9 @@
 use std::{env, process::Command};
 
 fn build_secp256k1() {
-    cc::Build::new()
+    let target = env::var("TARGET").expect("TARGET was not set");
+    let mut builder = cc::Build::new();
+    builder
         .opt_level(1)
         .flag_if_supported("-Wno-unused-function")
         .define("ENABLE_MODULE_EXTRAKEYS", "1")
@@ -10,8 +12,11 @@ fn build_secp256k1() {
         .include("depends/bitcoin/src/secp256k1/include")
         .include("depends/bitcoin/src/secp256k1/src")
         .file("depends/bitcoin/src/secp256k1/src/precomputed_ecmult.c")
-        .file("depends/bitcoin/src/secp256k1/src/secp256k1.c")
-        .compile("libsecp256k1.a");
+        .file("depends/bitcoin/src/secp256k1/src/secp256k1.c");
+    if target.contains("windows") {
+        builder.define("WIN32", "1");
+    }
+    builder.compile("libsecp256k1.a")
 }
 
 // Run `autogen.sh` and `configure` scripts for Bitcoin
@@ -42,7 +47,9 @@ fn main() {
 
     let out_dir = env::var("OUT_DIR").unwrap();
 
-    cc::Build::new()
+    let target = env::var("TARGET").expect("TARGET was not set");
+    let mut builder = cc::Build::new();
+    builder
         .cpp(true)
         .flag("-std=c++20")
         .opt_level(1)
@@ -62,8 +69,11 @@ fn main() {
         .file("depends/bitcoin/src/support/cleanse.cpp")
         .file("depends/bitcoin/src/uint256.cpp")
         .file("depends/bitcoin/src/util/strencodings.cpp")
-        .file("stubs/bitcoin-script.cpp")
-        .compile("bitcoin-script.a");
+        .file("stubs/bitcoin-script.cpp");
+    if target.contains("windows") {
+        builder.define("WIN32", "1");
+    }
+    builder.compile("bitcoin-script.a");
 
     println!("cargo:include=depends/bitcoin/src");
     println!("cargo:rerun-if-changed=stubs/bitcoin-script.cpp");
