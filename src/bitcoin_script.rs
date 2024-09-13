@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::{borrow::Borrow, collections::HashMap};
 
+use bitcoin::Transaction;
 use libc::c_uint;
 use thiserror::Error;
 
@@ -105,14 +106,17 @@ pub struct VerifyTxError {
 }
 
 /// Verify tx
-pub fn verify_tx(
+pub fn verify_tx<TxRef>(
     tx: &bitcoin::Transaction,
-    spent_outputs: &HashMap<bitcoin::Txid, bitcoin::Transaction>,
+    spent_outputs: &HashMap<bitcoin::Txid, TxRef>,
     flags: u32,
-) -> Result<(), VerifyTxError> {
+) -> Result<(), VerifyTxError>
+where
+    TxRef: Borrow<Transaction>,
+{
     let tx_encoded = bitcoin::consensus::serialize(tx);
     let get_spent_output = |outpoint: &bitcoin::OutPoint| {
-        &spent_outputs[&outpoint.txid].output[outpoint.vout as usize]
+        &spent_outputs[&outpoint.txid].borrow().output[outpoint.vout as usize]
     };
     for (input_idx, input) in tx.input.iter().enumerate() {
         let spent_output = get_spent_output(&input.previous_output);

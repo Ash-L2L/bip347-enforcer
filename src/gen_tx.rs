@@ -6,7 +6,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use bip300301::{client::BlockTemplate, MainClient as _};
+use bip300301::{
+    client::BlockTemplate, jsonrpsee::http_client::HttpClientBuilder,
+    MainClient as _,
+};
 use bitcoin::{
     absolute::LockTime,
     address::NetworkUnchecked,
@@ -701,16 +704,18 @@ async fn gen_script(
     let mut posix_script_builder =
         OutputPosixScriptBuilder::new(rpc_addr, rpc_auth.clone());
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+    let client_builder =
+        HttpClientBuilder::new().request_timeout(REQUEST_TIMEOUT);
     let client = bip300301::client(
         rpc_addr,
+        Some(client_builder),
         &rpc_auth.rpc_pass,
-        Some(REQUEST_TIMEOUT),
         &rpc_auth.rpc_user,
     )?;
     let BlockTemplate {
         height,
         prev_blockhash,
-        target,
+        compact_target,
         ..
     } = client.get_block_template(Default::default()).await?;
     let prev_blockhash = BlockHash::from_byte_array(*prev_blockhash.as_ref());
@@ -734,11 +739,7 @@ async fn gen_script(
         output: vec![coinbase_txout],
     };
     let coinbase_txid = coinbase_tx.compute_txid();
-    let block = gen_block(
-        prev_blockhash,
-        CompactTarget::from_consensus(target.to_consensus()),
-        vec![coinbase_tx],
-    );
+    let block = gen_block(prev_blockhash, compact_target, vec![coinbase_tx]);
     // Generate some blocks so that an output is available to spend
     posix_script_builder.curl_rpc(
         Some("Mine a block, so that the coinbase output can be used in later txs"),

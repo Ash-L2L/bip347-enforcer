@@ -7,11 +7,17 @@
 * Init submodules `git submodule update --init --recursive`
 * Build with `cargo build` or `cargo build --release`
 
+### Optional
+To compile with mempool enforcer support, use `cargo build --features=mempool` or `cargo build --release --features=mempool`.
+
 ## Configure Bitcoin node
 * Must use a version of Bitcoin Core more recent than `75118a608fc22a57567743000d636bc1f969f748`.
 * RPC server MUST be enabled.
 * ZMQ rawblock publishing MUST be enabled.
 * `txindex` MUST be enabled.
+
+If the mempool feature is enabled:
+* ZMQ sequence publishing MUST be enabled.
 
 ## Run
 For options, run `bip347-enforcer --help`.
@@ -25,6 +31,8 @@ bip347-enforcer \
   --zmq-addr-rawblock "tcp://127.0.0.1:28332" \
   --log-level DEBUG
 ```
+
+Extra options are required if the mempool feature is enabled.
 
 # Demo tool
 For options, run `gen-demo-tx --help`.

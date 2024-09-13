@@ -7,22 +7,29 @@ use std::{
 
 use bip300301::{
     client::{GetRawTransactionClient, GetRawTransactionVerbose},
+    jsonrpsee::http_client::{HttpClient, HttpClientBuilder},
     MainClient as _,
 };
 use bitcoin::Block;
-use bitcoin_0_31::hashes::Hash;
 use bitcoin_script::{op_cat_verify_flag, verify_tx, VerifyTxError};
+use cfg_if::cfg_if;
 use clap::Parser;
 use futures::{
     stream::{self, BoxStream},
     StreamExt, TryStream, TryStreamExt,
 };
-use jsonrpsee::http_client::HttpClient;
 use thiserror::Error;
 use tracing_subscriber::{filter as tracing_filter, layer::SubscriberExt};
 use zeromq::{Socket, SocketRecv, ZmqError, ZmqMessage};
 
 mod bitcoin_script;
+#[cfg(feature = "mempool")]
+mod enforcer;
+
+#[cfg(feature = "mempool")]
+const DEFAULT_SERVE_RPC_ADDR: SocketAddr = SocketAddr::V4(
+    std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 21_000),
+);
 
 #[derive(Parser)]
 struct Cli {
@@ -38,9 +45,17 @@ struct Cli {
     /// Bitcoin node RPC user
     #[arg(long)]
     rpc_user: String,
+    #[cfg(feature = "mempool")]
+    /// Serve `getblocktemplate` RPC from this address
+    #[arg(default_value_t = DEFAULT_SERVE_RPC_ADDR, long)]
+    serve_rpc_addr: SocketAddr,
     /// Bitcoin node ZMQ endpoint for `rawblock`
     #[arg(long)]
     zmq_addr_rawblock: String,
+    /// Bitcoin node ZMQ endpoint for `sequence`
+    #[cfg(feature = "mempool")]
+    #[arg(long)]
+    zmq_addr_sequence: String,
 }
 
 // Configure logger.
@@ -163,10 +178,18 @@ async fn subscribe_zmq_native(
 enum Error {
     #[error("Error deserializing tx")]
     BitcoinDeserialize(#[from] bitcoin::consensus::encode::FromHexError),
+    #[cfg(feature = "mempool")]
+    #[error("Initial mempool sync error")]
+    InitMempoolSync(
+        #[from] cusf_enforcer_mempool::mempool::InitialSyncMempoolError,
+    ),
     #[error(transparent)]
     RawBlockStream(#[from] RawBlockStreamError),
     #[error(transparent)]
-    Rpc(#[from] jsonrpsee::core::ClientError),
+    Rpc(#[from] bip300301::jsonrpsee::core::ClientError),
+    #[cfg(feature = "mempool")]
+    #[error("Build mempool RPC server error")]
+    RpcServer(#[source] std::io::Error),
     #[error(transparent)]
     Zmq(#[from] ZmqError),
     #[error("ZMQ stream ended unexpectedly")]
@@ -187,15 +210,9 @@ async fn get_spent_outputs(
         .collect();
     tracing::debug!("requesting {} raw txs...", txs_needed.len());
     let futs = txs_needed.into_iter().map(|txid| async move {
-        let txid_bytes: [u8; 32] = *txid.as_ref();
-        let rpc_txid = bitcoin_0_31::Txid::from_byte_array(txid_bytes);
         tracing::debug!("getting raw tx for {txid}...");
         let tx_hex = rpc_client
-            .get_raw_transaction(
-                rpc_txid,
-                GetRawTransactionVerbose::<false>,
-                None,
-            )
+            .get_raw_transaction(txid, GetRawTransactionVerbose::<false>, None)
             .await?;
         tracing::debug!("received raw tx for {txid}");
         let tx = bitcoin::consensus::encode::deserialize_hex(&tx_hex)?;
@@ -251,36 +268,125 @@ where
         if let Err(err) = validate_block(&rpc_client, &block).await? {
             let err = anyhow::Error::from(err);
             tracing::warn!("Invalidating block {block_hash}: {err:#}");
-            let block_hash: [u8; 32] = *block_hash.as_ref();
-            let block_hash =
-                bitcoin_0_31::BlockHash::from_byte_array(block_hash);
             rpc_client.invalidate_block(block_hash).await?;
         }
     }
     Err(Error::ZmqStreamEnd)
 }
 
+async fn block_enforcer(
+    zmq_addr_rawblock: &str,
+    rpc_client: HttpClient,
+) -> Result<(), Error> {
+    let raw_blocks = subscribe_zmq_native(zmq_addr_rawblock).await?;
+    handle_raw_blocks(raw_blocks, rpc_client).await
+}
+
+#[cfg(feature = "mempool")]
+async fn spawn_rpc_server(
+    server: cusf_enforcer_mempool::server::Server,
+    serve_rpc_addr: SocketAddr,
+) -> std::io::Result<jsonrpsee::server::ServerHandle> {
+    use cusf_enforcer_mempool::server::RpcServer;
+    let handle = jsonrpsee::server::Server::builder()
+        .build(serve_rpc_addr)
+        .await?
+        .start(server.into_rpc());
+    Ok(handle)
+}
+
+#[cfg(feature = "mempool")]
+async fn mempool_enforcer(
+    serve_rpc_addr: SocketAddr,
+    zmq_addr_sequence: &str,
+    rpc_client: HttpClient,
+    network_info: bip300301::client::NetworkInfo,
+) -> Result<(), Error> {
+    let sample_block_template =
+        rpc_client.get_block_template(Default::default()).await?;
+    let mut sequence_stream =
+        cusf_enforcer_mempool::zmq::subscribe_sequence(zmq_addr_sequence)
+            .await?;
+    let (mempool, tx_cache) = {
+        cusf_enforcer_mempool::mempool::init_sync_mempool(
+            &rpc_client,
+            &mut sequence_stream,
+            sample_block_template.prev_blockhash,
+        )
+        .await?
+    };
+    tracing::info!("Initial mempool sync complete");
+    let mempool = cusf_enforcer_mempool::mempool::MempoolSync::new(
+        enforcer::Bip347Enforcer,
+        mempool,
+        tx_cache,
+        &rpc_client,
+        sequence_stream,
+    );
+    let server = cusf_enforcer_mempool::server::Server::new(
+        mempool,
+        network_info,
+        sample_block_template,
+    );
+    let rpc_server_handle = spawn_rpc_server(server, serve_rpc_addr)
+        .await
+        .map_err(Error::RpcServer)?;
+    let () = rpc_server_handle.stopped().await;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     set_tracing_subscriber(cli.log_level)?;
-    let rpc_client = {
-        const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-        let client = bip300301::client(
-            cli.rpc_addr,
-            &cli.rpc_pass,
-            Some(REQUEST_TIMEOUT),
-            &cli.rpc_user,
-        )?;
-        // get network info to check that RPC client is configured correctly
-        let _network_info = client.get_network_info().await?;
-        tracing::debug!("connected to RPC server");
-        client
-    };
-    //let zmq_rx = subscribe_zmq(&cli.zmq_addr_rawblock)?;
-    //tracing::debug!("subscribed to rawblock");
-    let raw_blocks = subscribe_zmq_native(&cli.zmq_addr_rawblock).await?;
-    //let () = handle_zmq(zmq_rx, rpc_client).await?;
-    let () = handle_raw_blocks(raw_blocks, rpc_client).await?;
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+    cfg_if! {
+        if #[cfg(feature = "mempool")] {
+            // A mempool of default size might contain >300k txs.
+            // batch Requesting 300k txs requires ~30MiB,
+            // so 100MiB should be enough
+            const MAX_REQUEST_SIZE: u32 = 100 * (1 << 20);
+            // Default mempool size is 300MB, so 1GiB should be enough
+            const MAX_RESPONSE_SIZE: u32 = 1 << 30;
+            let (rpc_client, network_info) = {
+                let client_builder =
+                    HttpClientBuilder::new()
+                        .max_request_size(MAX_REQUEST_SIZE)
+                        .max_response_size(MAX_RESPONSE_SIZE)
+                        .request_timeout(REQUEST_TIMEOUT);
+                let client = bip300301::client(
+                    cli.rpc_addr,
+                    Some(client_builder),
+                    &cli.rpc_pass,
+                    &cli.rpc_user,
+                )?;
+                // get network info to check that RPC client is configured correctly
+                let network_info = client.get_network_info().await?;
+                tracing::debug!("connected to RPC server");
+                (client, network_info)
+            };
+            let ((), ()) = futures::future::try_join(
+                block_enforcer(&cli.zmq_addr_rawblock, rpc_client.clone()),
+                mempool_enforcer(cli.serve_rpc_addr, &cli.zmq_addr_sequence, rpc_client, network_info)
+            ).await?;
+        } else {
+            let (rpc_client, _network_info) = {
+                let client_builder =
+                    HttpClientBuilder::new()
+                        .request_timeout(REQUEST_TIMEOUT);
+                let client = bip300301::client(
+                    cli.rpc_addr,
+                    Some(client_builder),
+                    &cli.rpc_pass,
+                    &cli.rpc_user,
+                )?;
+                // get network info to check that RPC client is configured correctly
+                let network_info = client.get_network_info().await?;
+                tracing::debug!("connected to RPC server");
+                (client, network_info)
+            };
+            let () = block_enforcer(&cli.zmq_addr_rawblock, rpc_client).await?;
+        }
+    }
     Ok(())
 }
