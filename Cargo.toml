@@ -9,7 +9,6 @@ cc = "1.0.101"
 [dependencies]
 anyhow = "1.0.86"
 bitcoin = { version = "0.32.2", features = ["rand", "serde"] }
-cfg-if = "1.0.0"
 clap = { version = "4.5.7", features = ["derive"] }
 futures = "0.3.30"
 integer-sqrt = "0.1.5"
@@ -24,23 +23,18 @@ thiserror = "1.0.63"
 tokio = { version = "1.38.0", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
-zeromq = "0.4.0"
 
-[dependencies.bip300301]
-git = "https://github.com/Ash-L2L/bip300301.git"
-rev = "4ec0175093b072d4d0a523321b7bb35e3fc96ccf"
+[dependencies.bitcoin-jsonrpsee]
+git = "https://github.com/LayerTwo-Labs/bitcoin-jsonrpsee.git"
+rev = "360b4e4e3ab333a34e0d82d023494cbd8f13b06e"
 features = ["tracing"]
 
 [dependencies.cusf-enforcer-mempool]
-git = "https://github.com/Ash-L2L/bip300-enforcer-mempool"
-rev = "5a54710dbc3d4e62269c815a63108538d030e58c"
-optional = true
+git = "https://github.com/LayerTwo-Labs/cusf-enforcer-mempool"
+rev = "94d71d7a7f8bb37c5df3c2716577b4d0a056c42e"
 
 [dev-dependencies]
 bitcoin = { version = "0.32.2", features = ["bitcoinconsensus"] }
-
-[features]
-mempool = ["dep:cusf-enforcer-mempool"]
 
 [[bin]]
 name = "gen-demo-tx"

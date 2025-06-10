@@ -6,10 +6,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use bip300301::{
-    client::BlockTemplate, jsonrpsee::http_client::HttpClientBuilder,
-    MainClient as _,
-};
 use bitcoin::{
     absolute::LockTime,
     address::NetworkUnchecked,
@@ -29,6 +25,10 @@ use bitcoin::{
     Address, Amount, Block, BlockHash, CompactTarget, Denomination, OutPoint,
     PublicKey, Script, ScriptBuf, Sequence, Target, Transaction, TxIn,
     TxMerkleNode, TxOut, Txid, Witness,
+};
+use bitcoin_jsonrpsee::{
+    client::BlockTemplate, jsonrpsee::http_client::HttpClientBuilder,
+    MainClient as _,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use integer_sqrt::IntegerSquareRoot;
@@ -706,7 +706,7 @@ async fn gen_script(
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
     let client_builder =
         HttpClientBuilder::new().request_timeout(REQUEST_TIMEOUT);
-    let client = bip300301::client(
+    let client = bitcoin_jsonrpsee::client(
         rpc_addr,
         Some(client_builder),
         &rpc_auth.rpc_pass,
