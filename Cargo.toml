@@ -7,12 +7,12 @@ edition = "2021"
 cc = "1.0.101"
 
 [dependencies]
-anyhow = "1.0.86"
+anyhow = "1.0.102"
 bitcoin = { version = "0.32.2", features = ["rand", "serde"] }
 clap = { version = "4.5.7", features = ["derive"] }
 futures = "0.3.30"
 integer-sqrt = "0.1.5"
-jsonrpsee = "0.24.3"
+jsonrpsee = { version = "0.26.0", features = ["server"] }
 libc = "0.2.155"
 rand = "0.8.5"
 serde = "1.0.204"
@@ -26,12 +26,12 @@ tracing-subscriber = "0.3.18"
 
 [dependencies.bitcoin-jsonrpsee]
 git = "https://github.com/LayerTwo-Labs/bitcoin-jsonrpsee.git"
-rev = "360b4e4e3ab333a34e0d82d023494cbd8f13b06e"
+rev = "db1fdfd5ecddfc7855cd872546b47429cb29a0bf"
 features = ["tracing"]
 
 [dependencies.cusf-enforcer-mempool]
 git = "https://github.com/LayerTwo-Labs/cusf-enforcer-mempool"
-rev = "94d71d7a7f8bb37c5df3c2716577b4d0a056c42e"
+rev = "4fa57ffc01197de508a301ea9e191517c04f235f"
 
 [dev-dependencies]
 bitcoin = { version = "0.32.2", features = ["bitcoinconsensus"] }

@@ -12,9 +12,10 @@ use bitcoin_jsonrpsee::{
 };
 use cusf_enforcer_mempool::{
     cusf_block_producer::{
-        typewit, CoinbaseTxn, CusfBlockProducer, InitialBlockTemplate,
+        typewit, BlockTemplateSuffix, CoinbaseTxn, CusfBlockProducer,
+        InitialBlockTemplate,
     },
-    cusf_enforcer::{ConnectBlockAction, CusfEnforcer},
+    cusf_enforcer::{ConnectBlockAction, CusfEnforcer, TxAcceptAction},
 };
 use futures::{stream, StreamExt as _, TryStreamExt as _};
 use thiserror::Error;
@@ -127,12 +128,18 @@ impl CusfEnforcer for Bip347Enforcer {
         &mut self,
         tx: &bitcoin::Transaction,
         tx_inputs: &HashMap<Txid, TxRef>,
-    ) -> Result<bool, Self::AcceptTxError>
+    ) -> Result<TxAcceptAction, Self::AcceptTxError>
     where
         TxRef: Borrow<Transaction>,
     {
-        let res = verify_tx(tx, tx_inputs, op_cat_verify_flag()).is_ok();
-        Ok(res)
+        if verify_tx(tx, tx_inputs, op_cat_verify_flag()).is_ok() {
+            Ok(TxAcceptAction::Accept {
+                conflicts_with: HashSet::new(),
+                weight_tweak: 0,
+            })
+        } else {
+            Ok(TxAcceptAction::Reject)
+        }
     }
 }
 
@@ -141,6 +148,7 @@ impl CusfBlockProducer for Bip347Enforcer {
 
     async fn initial_block_template<const COINBASE_TXN: bool>(
         &self,
+        _parent_block_hash: &BlockHash,
         _coinbase_txn_wit: typewit::const_marker::BoolWit<COINBASE_TXN>,
         _template: InitialBlockTemplate<COINBASE_TXN>,
     ) -> Result<
@@ -159,14 +167,15 @@ impl CusfBlockProducer for Bip347Enforcer {
 
     type SuffixTxsError = Infallible;
 
-    async fn suffix_txs<const COINBASE_TXN: bool>(
+    async fn block_template_suffix<const COINBASE_TXN: bool>(
         &self,
+        _parent_block_hash: &BlockHash,
         _coinbase_txn_wit: typewit::const_marker::BoolWit<COINBASE_TXN>,
         _template: &InitialBlockTemplate<COINBASE_TXN>,
-    ) -> Result<Vec<(Transaction, bitcoin::Amount)>, Self::SuffixTxsError>
+    ) -> Result<BlockTemplateSuffix<COINBASE_TXN>, Self::SuffixTxsError>
     where
         typewit::const_marker::Bool<COINBASE_TXN>: CoinbaseTxn,
     {
-        Ok(Vec::new())
+        Ok(BlockTemplateSuffix::default())
     }
 }

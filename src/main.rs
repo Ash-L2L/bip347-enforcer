@@ -118,10 +118,16 @@ async fn block_enforcer(
     .await
 }
 
-async fn spawn_rpc_server(
-    server: cusf_enforcer_mempool::server::Server<enforcer::Bip347Enforcer>,
+async fn spawn_rpc_server<RpcClient>(
+    server: cusf_enforcer_mempool::server::Server<
+        enforcer::Bip347Enforcer,
+        RpcClient,
+    >,
     serve_rpc_addr: SocketAddr,
-) -> std::io::Result<jsonrpsee::server::ServerHandle> {
+) -> std::io::Result<jsonrpsee::server::ServerHandle>
+where
+    RpcClient: bitcoin_jsonrpsee::MainClient + Send + Sync + 'static,
+{
     use cusf_enforcer_mempool::server::RpcServer;
     let handle = jsonrpsee::server::Server::builder()
         .build(serve_rpc_addr)
@@ -139,6 +145,7 @@ async fn mempool_enforcer(
 ) -> Result<(), Error> {
     use futures::future::{select, Either};
     let chain_info = rpc_client.get_blockchain_info().await?;
+    let network = chain_info.chain;
     let sample_block_template =
         rpc_client.get_block_template(Default::default()).await?;
     let mut enforcer = enforcer::Bip347Enforcer {
@@ -147,6 +154,7 @@ async fn mempool_enforcer(
     let (sequence_stream, mempool, tx_cache) = {
         cusf_enforcer_mempool::mempool::init_sync_mempool(
             &mut enforcer,
+            network,
             &rpc_client,
             zmq_addr_sequence,
             futures::future::pending(),
@@ -159,7 +167,7 @@ async fn mempool_enforcer(
         enforcer,
         mempool,
         tx_cache,
-        rpc_client,
+        rpc_client.clone(),
         sequence_stream,
         |err| async {
             let err = anyhow::Error::from(err);
@@ -169,11 +177,14 @@ async fn mempool_enforcer(
             };
         },
     );
+    let cached_template_lifetime = None;
     let server = cusf_enforcer_mempool::server::Server::new(
         coinbase_spk,
         mempool,
-        chain_info.chain,
+        network,
         network_info,
+        rpc_client,
+        cached_template_lifetime,
         sample_block_template,
     )?;
     let rpc_server_handle = spawn_rpc_server(server, serve_rpc_addr)
